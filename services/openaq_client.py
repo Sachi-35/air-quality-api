@@ -2,6 +2,8 @@ import httpx
 from fastapi import HTTPException
 from config import settings
 
+print("API KEY LOADED:", settings.openaq_api_key[:8] if settings.openaq_api_key else "EMPTY")
+
 HEADERS = {
     "Accept": "application/json",
     "User-Agent": "AirQualityMonitor/1.0",
@@ -41,26 +43,83 @@ async def fetch_cities(limit: int = 100) -> list[dict]:
     return data.get("results", [])
 
 
+def _extract_city_name(location: dict) -> str:
+    """Best-effort extraction of city name from location metadata."""
+    # Try different fields OpenAQ v3 might return
+    for field in ("city", "locality", "name"):
+        val = location.get(field)
+        if val and isinstance(val, str) and val.strip():
+            return val.strip()
+    # Fall back to country code
+    country = location.get("country", {})
+    if isinstance(country, dict):
+        return country.get("name", "Unknown")
+    return str(country) if country else "Unknown"
+
+
 async def fetch_latest_by_city(city: str) -> list[dict]:
-    data = await _get("/locations", {"city": city, "limit": 10})
+    data = await _get("/locations", {"city": city, "limit": 50})
     results = data.get("results", [])
-    if not results:
+
+    # Filter client-side since OpenAQ city param is unreliable
+    filtered = [
+        loc for loc in results
+        if city.lower() in loc.get("name", "").lower()
+        or city.lower() in (loc.get("locality") or "").lower()
+    ]
+
+    if not filtered:
+        # Fall back to unfiltered if nothing matched
+        filtered = results
+
+    if not filtered:
         raise HTTPException(404, f"No data found for city: {city}")
+
+    return filtered
+
+
+async def fetch_measurements(location: dict, parameter: str = None, limit: int = 24) -> list[dict]:
+    from datetime import datetime, timezone, timedelta
+
+    sensors = location.get("sensors", [])
+
+    if parameter:
+        sensors = [
+            s for s in sensors
+            if s.get("parameter", {}).get("name", "").lower() == parameter.lower()
+            and s.get("parameter", {}).get("units", "") == "µg/m³"  # only µg/m³
+        ]
+    else:
+        # Deduplicate: one µg/m³ sensor per parameter
+        seen = set()
+        filtered = []
+        for s in sensors:
+            param = s.get("parameter", {})
+            name = param.get("name", "").lower()
+            units = param.get("units", "")
+            if units == "µg/m³" and name not in seen:
+                seen.add(name)
+                filtered.append(s)
+        sensors = filtered
+
+    results = []
+    for sensor in sensors[:3]:
+        sensor_id = sensor.get("id")
+        if not sensor_id:
+            continue
+        data = await _get(
+            f"/sensors/{sensor_id}/measurements",
+            {"limit": limit, "date_order": "desc"}
+        )
+        for r in data.get("results", []):
+            results.append({
+                "parameter": r.get("parameter", {}).get("name", ""),
+                "value": r.get("value"),
+                "unit": r.get("parameter", {}).get("units", "µg/m³"),
+                "lastUpdated": r.get("period", {}).get("datetimeTo", {}).get("utc"),
+            })
+
     return results
-
-
-async def fetch_measurements(location_id: int, parameter: str = "pm25", limit: int = 24) -> list[dict]:
-    """Fetch historical measurements for trend analysis."""
-    data = await _get(
-        "/measurements",
-        {
-            "location_id": location_id,
-            "parameter": parameter,
-            "limit": limit,
-            "sort": "desc",
-        },
-    )
-    return data.get("results", [])
 
 
 async def ping() -> bool:

@@ -13,7 +13,7 @@ async def health():
     Returns API status, cache stats, config summary, and upstream reachability.
     """
     openaq_ok = await ping()
-    cache_entries = len(cache._store)  # noqa: SLF001 — intentional internal access for diagnostics
+    cache_entries = len(cache._store)  # noqa: SLF001
 
     return {
         "status": "ok" if openaq_ok else "degraded",

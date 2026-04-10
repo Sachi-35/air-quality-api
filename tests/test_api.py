@@ -95,9 +95,15 @@ def test_cities_cached_on_second_call(mock_fetch, client):
 
 # ── /aqi ────────────────────────────────────────────────────────────────────
 
+@patch("routes.aqi.fetch_measurements", new_callable=AsyncMock)
 @patch("routes.aqi.fetch_latest_by_city", new_callable=AsyncMock)
-def test_aqi_delhi(mock_fetch, client):
-    mock_fetch.return_value = [MOCK_LOCATIONS[0]]
+def test_aqi_delhi(mock_fetch_latest, mock_fetch_measurements, client):
+    mock_fetch_latest.return_value = [MOCK_LOCATIONS[0]]
+    mock_fetch_measurements.return_value = [
+        {"value": 120.5, "date": {"utc": "2024-01-15T08:00:00Z"}},
+        {"value": 60.0, "date": {"utc": "2024-01-15T08:00:00Z"}},
+    ]
+
     r = client.get("/aqi?city=Delhi")
     assert r.status_code == 200
     body = r.json()
@@ -121,6 +127,22 @@ def test_aqi_city_not_found(mock_fetch, client):
     mock_fetch.side_effect = HTTPException(404, "No data found for city: XyzCity")
     r = client.get("/aqi?city=XyzCity")
     assert r.status_code == 404
+
+
+@patch("routes.aqi.fetch_measurements", new_callable=AsyncMock)
+@patch("routes.aqi.fetch_latest_by_city", new_callable=AsyncMock)
+def test_aqi_no_measurements(mock_fetch_latest, mock_fetch_measurements, client):
+    mock_fetch_latest.return_value = [MOCK_LOCATIONS[0]]
+    mock_fetch_measurements.return_value = []  # No measurements available
+
+    r = client.get("/aqi?city=Delhi")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["city"] == "Delhi"
+    assert body["aqi"] == 0
+    assert body["category"] == "Good"
+    assert body["dominant_pollutant"] == "pm25"
+    assert body["measurements"] == []
 
 
 # ── /trend ───────────────────────────────────────────────────────────────────

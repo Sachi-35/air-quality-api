@@ -1,5 +1,5 @@
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field
+from typing import List, Optional
 from datetime import datetime
 
 
@@ -19,10 +19,10 @@ class CityInfo(BaseModel):
 class AQIResponse(BaseModel):
     city: str
     country: str
-    aqi: int
-    category: str
-    dominant_pollutant: str
-    measurements: list[Measurement]
+    aqi: Optional[int] = None
+    category: Optional[str] = None
+    dominant_pollutant: Optional[str] = None
+    measurements: List[Measurement] = Field(default_factory=list)
     last_updated: Optional[datetime] = None
 
 

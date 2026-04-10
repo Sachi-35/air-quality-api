@@ -43,16 +43,25 @@ def clean_measurement(raw: dict) -> Optional[Measurement]:
 
 
 def extract_measurements_from_location(location: dict) -> list[Measurement]:
-    """Pull sensor readings from a location result."""
+    """Pull sensor readings from a location result.
+
+    This helper is best-effort for legacy payloads that already include values.
+    Most OpenAQ v3 /locations responses only expose sensor metadata,
+    so routes should fetch actual measurements separately.
+    """
     measurements = []
     sensors = location.get("sensors", []) or location.get("parameters", [])
 
     for sensor in sensors:
-        # v3 API nests latest value under lastValue
-        value = sensor.get("lastValue") or sensor.get("value")
+        # v3 API nests latest value under lastValue when present
+        value = sensor.get("lastValue") if "lastValue" in sensor else sensor.get("value")
         param = sensor.get("parameter", {})
         param_name = param.get("name", "") if isinstance(param, dict) else str(param)
-        unit = param.get("units", "µg/m³") if isinstance(param, dict) else "µg/m³"
+        unit = (
+            param.get("units")
+            if isinstance(param, dict)
+            else sensor.get("unit", "µg/m³")
+        )
 
         m = clean_measurement({
             "parameter": param_name,
@@ -64,6 +73,32 @@ def extract_measurements_from_location(location: dict) -> list[Measurement]:
             measurements.append(m)
 
     return measurements
+
+
+def extract_parameters_from_location(location: dict) -> list[dict[str, str]]:
+    """Extract parameter names and units from a location payload."""
+    parameters = []
+    sensors = location.get("sensors", []) or location.get("parameters", [])
+
+    for sensor in sensors:
+        param = sensor.get("parameter", {})
+        if isinstance(param, dict):
+            name = param.get("name") or param.get("parameter")
+            units = param.get("units") or param.get("unit") or sensor.get("unit") or sensor.get("units")
+        else:
+            name = str(param)
+            units = sensor.get("unit") or sensor.get("units")
+
+        if not name or not isinstance(name, str):
+            continue
+
+        parameters.append(
+            {
+                "parameter": name.lower().strip(),
+                "unit": units if units else "µg/m³",
+            }
+        )
+    return parameters
 
 
 def extract_city_name(location: dict) -> str:
