@@ -13,6 +13,7 @@ from limiter import limiter
 from logger import setup_logging, get_logger
 from routes import cities, aqi, trend
 from routes.health import router as health_router
+from routes.predict import router as predict_router
 
 setup_logging()
 log = get_logger("main")
@@ -78,6 +79,7 @@ async def log_requests(request: Request, call_next):
     response.headers["X-Response-Time-Ms"] = str(duration_ms)
     return response
 
+
 # ── Global unhandled-exception handler ───────────────────────────────────────
 
 @app.exception_handler(Exception)
@@ -85,12 +87,15 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     log.error("unhandled_exception", path=request.url.path, error=str(exc), exc_info=True)
     return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
+
 # ── Routers ───────────────────────────────────────────────────────────────────
 
 app.include_router(health_router)
 app.include_router(cities.router)
 app.include_router(aqi.router)
 app.include_router(trend.router)
+app.include_router(predict_router)  # ← moved here, after app is defined
+
 
 # ── Root ──────────────────────────────────────────────────────────────────────
 

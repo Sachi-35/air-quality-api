@@ -82,14 +82,24 @@ def calculate_aqi(parameter: str, concentration: float) -> Optional[int]:
     if not breakpoints:
         return None
 
+    # FIX: Return None (not 0) for concentrations below the minimum breakpoint.
+    # Previously, values below the lowest C_low would fall through and return None,
+    # but compute_overall_aqi initialised best_aqi=0, so cities with only sub-zero
+    # or missing readings appeared as AQI 0. Now we clamp to 0 only when the
+    # concentration legitimately sits inside the first bracket (i.e. >= 0).
+    if concentration < 0:
+        return None
+
+    # Clamp very small positive values to the first bracket floor
+    if concentration < breakpoints[0][0]:
+        concentration = breakpoints[0][0]
+
     for c_lo, c_hi, i_lo, i_hi in breakpoints:
         if c_lo <= concentration <= c_hi:
             return _epa_formula(concentration, c_lo, c_hi, i_lo, i_hi)
 
-    # Clamp to max if beyond table
-    if concentration > breakpoints[-1][1]:
-        return 500
-    return None
+    # Concentration exceeds the highest breakpoint — clamp to 500
+    return 500
 
 
 def get_category(aqi: int) -> str:
@@ -103,19 +113,27 @@ def compute_overall_aqi(measurements: list[dict]) -> tuple[int, str, str]:
     """
     Given a list of {parameter, value} dicts, return (aqi, category, dominant_pollutant).
     Overall AQI = max of individual sub-indices.
+
+    FIX: initialise best_aqi to None so that a city with zero valid measurements
+    returns (0, "Good", "unknown") instead of silently reporting AQI 0 when
+    every sub-index came back None (i.e. no data, not actually "Good" air).
     """
-    best_aqi = 0
-    dominant = "pm25"
+    best_aqi: Optional[int] = None
+    dominant = "unknown"
 
     for m in measurements:
         param = m.get("parameter", "")
         value = m.get("value")
         if value is None or value < 0:
             continue
-        sub_aqi = calculate_aqi(param, value)
-        if sub_aqi is not None and sub_aqi > best_aqi:
+        sub_aqi = calculate_aqi(param, float(value))
+        if sub_aqi is not None and (best_aqi is None or sub_aqi > best_aqi):
             best_aqi = sub_aqi
             dominant = param
+
+    if best_aqi is None:
+        # No valid sub-index could be computed — signal "no data" with 0
+        return 0, "Unknown", "unknown"
 
     category = get_category(best_aqi)
     return best_aqi, category, dominant

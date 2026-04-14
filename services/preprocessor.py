@@ -3,11 +3,22 @@ from typing import Optional
 from models.schemas import Measurement
 
 
-def parse_datetime(value: Optional[str]) -> Optional[datetime]:
+def parse_datetime(value: Optional[str | dict]) -> Optional[datetime]:
+    """
+    Parse a datetime from either:
+      - An ISO 8601 string  (legacy / v2 format)
+      - An OpenAQ v3 datetime object: {"utc": "...", "local": "..."}
+    """
     if not value:
         return None
+
+    # FIX: OpenAQ v3 wraps timestamps in a dict — unwrap before parsing.
+    if isinstance(value, dict):
+        value = value.get("utc") or value.get("local")
+        if not value:
+            return None
+
     try:
-        # Handle ISO 8601 with or without timezone
         if value.endswith("Z"):
             value = value[:-1] + "+00:00"
         return datetime.fromisoformat(value)
@@ -21,6 +32,8 @@ def clean_measurement(raw: dict) -> Optional[Measurement]:
         param = raw.get("parameter", "").lower().strip()
         value = raw.get("value")
         unit = raw.get("unit", "µg/m³")
+
+        # FIX: lastUpdated in v3 can be a dict — delegate to parse_datetime
         last_updated = parse_datetime(
             raw.get("lastUpdated") or raw.get("date", {}).get("utc")
         )
@@ -29,7 +42,7 @@ def clean_measurement(raw: dict) -> Optional[Measurement]:
             return None
 
         value = float(value)
-        if value < 0:  # Negative readings are invalid
+        if value < 0:
             return None
 
         return Measurement(
@@ -45,16 +58,25 @@ def clean_measurement(raw: dict) -> Optional[Measurement]:
 def extract_measurements_from_location(location: dict) -> list[Measurement]:
     """Pull sensor readings from a location result.
 
-    This helper is best-effort for legacy payloads that already include values.
-    Most OpenAQ v3 /locations responses only expose sensor metadata,
-    so routes should fetch actual measurements separately.
+    Handles both legacy payloads (value on the sensor object) and OpenAQ v3
+    payloads where the latest reading is under sensor["latestValues"][0] or
+    sensor["lastValue"].
     """
     measurements = []
     sensors = location.get("sensors", []) or location.get("parameters", [])
 
     for sensor in sensors:
-        # v3 API nests latest value under lastValue when present
-        value = sensor.get("lastValue") if "lastValue" in sensor else sensor.get("value")
+        # FIX: v3 sometimes puts latest concentration in latestValues list
+        value = sensor.get("lastValue")
+        if value is None:
+            latest_values = sensor.get("latestValues") or []
+            if latest_values:
+                value = latest_values[0].get("value")
+
+        # Final fallback for legacy payloads
+        if value is None:
+            value = sensor.get("value")
+
         param = sensor.get("parameter", {})
         param_name = param.get("name", "") if isinstance(param, dict) else str(param)
         unit = (
@@ -63,11 +85,13 @@ def extract_measurements_from_location(location: dict) -> list[Measurement]:
             else sensor.get("unit", "µg/m³")
         )
 
+        # FIX: datetimeFirst may be a dict in v3 — parse_datetime handles both
+        raw_ts = location.get("datetimeFirst") or location.get("datetimeLast")
         m = clean_measurement({
             "parameter": param_name,
             "value": value,
             "unit": unit,
-            "lastUpdated": location.get("datetimeFirst", {}).get("utc") if isinstance(location.get("datetimeFirst"), dict) else None,
+            "lastUpdated": raw_ts,
         })
         if m:
             measurements.append(m)
@@ -103,12 +127,10 @@ def extract_parameters_from_location(location: dict) -> list[dict[str, str]]:
 
 def extract_city_name(location: dict) -> str:
     """Best-effort extraction of city name from location metadata."""
-    # Try different fields OpenAQ v3 might return
     for field in ("city", "locality", "name"):
         val = location.get(field)
         if val and isinstance(val, str) and val.strip():
             return val.strip()
-    # Fall back to country code
     country = location.get("country", {})
     if isinstance(country, dict):
         return country.get("name", "Unknown")

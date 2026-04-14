@@ -25,6 +25,10 @@ async def get_trend(
     """
     Returns historical AQI readings for a city to show the trend over time.
     Uses the first monitoring station found for that city. Cached for 15 minutes.
+
+    FIX: Returns an empty trend list (not 404) when the city exists but has no
+    historical data for the requested parameter. The frontend should show an
+    empty-state message rather than crashing on a 404.
     """
     cache_key = f"trend:{city.lower()}:{parameter}:{limit}"
     cached = cache.get(cache_key)
@@ -56,19 +60,41 @@ async def get_trend(
         if target_location:
             break
 
+    # FIX: Instead of raising 404, return an empty trend with a hint about
+    # which parameters are available for this city.
     if not target_location:
-        raise HTTPException(
-            404,
-            f"No measurements for '{parameter}' in {city}. "
-            f"Try: {', '.join(PREFERRED_PARAMS)}",
+        available = _available_params(locations)
+        log.warning(
+            "trend_no_parameter",
+            city=city,
+            parameter=parameter,
+            available=available,
         )
+        result = TrendResponse(
+            city=city,
+            parameter=parameter,
+            unit=unit,
+            trend=[],
+            message=(
+                f"No '{parameter}' sensor found in {city}. "
+                f"Available: {', '.join(available) or 'none detected'}"
+            ),
+        )
+        # Cache the empty result for a shorter period (5 min) to avoid
+        # hammering OpenAQ for parameters that genuinely don't exist.
+        cache.set(cache_key, result, ttl=300)
+        return result
 
     raw_measurements = await fetch_measurements(target_location, parameter, limit)
 
     trend_points: list[TrendPoint] = []
     for m in raw_measurements:
-        value = m.get("value")
-        timestamp = parse_datetime(m.get("lastUpdated"))  # new format uses lastUpdated
+        value = _extract_value(m)
+        # FIX: lastUpdated in v3 responses can be a dict — parse_datetime now
+        # handles both string and dict forms (see preprocessor.py fix).
+        timestamp = parse_datetime(
+            m.get("lastUpdated") or m.get("date")
+        )
 
         if value is None or value < 0 or timestamp is None:
             continue
@@ -79,11 +105,55 @@ async def get_trend(
             TrendPoint(timestamp=timestamp, aqi=sub_aqi, category=get_category(sub_aqi))
         )
 
+    # Sort chronologically (oldest → newest) so charts render correctly
+    trend_points.sort(key=lambda p: p.timestamp)
+
+    if not trend_points:
+        log.warning("trend_empty_after_parse", city=city, parameter=parameter,
+                    raw_count=len(raw_measurements))
+
     result = TrendResponse(
         city=city,
         parameter=parameter,
         unit=unit,
         trend=trend_points,
+        message=None if trend_points else (
+            f"Station found but no valid '{parameter}' readings returned by OpenAQ. "
+            "This is common for less-monitored cities. Try a different parameter."
+        ),
     )
     cache.set(cache_key, result)
     return result
+
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _available_params(locations: list[dict]) -> list[str]:
+    """Collect all parameter names across all locations."""
+    seen = set()
+    for loc in locations:
+        sensors = loc.get("sensors", []) or loc.get("parameters", [])
+        for sensor in sensors:
+            param = sensor.get("parameter", {})
+            name = (param.get("name", "") if isinstance(param, dict) else str(param)).lower()
+            if name:
+                seen.add(name)
+    return sorted(seen)
+
+
+def _extract_value(m: dict) -> float | None:
+    """
+    Extract concentration value from a raw measurement dict.
+    OpenAQ v3 /measurements responses nest the value under m["value"] directly,
+    but some endpoints wrap it under m["summary"]["avg"] or m["value"]["avg"].
+    """
+    value = m.get("value")
+    if isinstance(value, dict):
+        # v3 summary object: pick average, falling back to min
+        value = value.get("avg") or value.get("min")
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
